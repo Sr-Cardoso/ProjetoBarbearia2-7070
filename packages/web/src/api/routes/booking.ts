@@ -9,10 +9,20 @@ import {
   SLOTS,
   isPast,
   isValidDate,
-  isWeekend,
   normalizePhone,
   slotRange,
+  weekdayName,
+  workDaysLabel,
 } from "../lib/schedule";
+import { readAppBooking } from "../lib/app-redirect";
+import { BLIP_SETTINGS_PREFIX } from "../lib/blip";
+import { syncAppointmentToBlip } from "../lib/blip-sync";
+import {
+  closedReason,
+  fullDayClosedDates,
+  isOpenDate,
+  loadScheduleRules,
+} from "../lib/agenda-rules";
 
 const dateInput = z.object({
   date: z.string().refine(isValidDate, "Data inválida"),
@@ -47,26 +57,64 @@ export const booking = {
       .orderBy(asc(schema.barbers.sortOrder), asc(schema.barbers.id)),
   ),
 
-  /** Dados públicos da barbearia (whatsapp, endereço, horários). */
-  settings: tenantBase.handler(async ({ context }): Promise<Record<string, string>> => ({
-    ...(await loadSettings(context.tenant.id)),
-    tenantName: context.tenant.name,
-    tenantDomain: context.tenant.domain,
-  })),
+  /**
+   * Dados públicos da barbearia (whatsapp, endereço, horários).
+   *
+   * Ficam de fora, por segurança: as chaves do redirecionamento para o app
+   * (`appBooking*`, que saem em `appBooking`) e as credenciais da integração
+   * BlipBeauty (`blip*`, incluindo a API key) — nada disso pode chegar ao
+   * navegador de um visitante.
+   */
+  settings: tenantBase.handler(async ({ context }): Promise<Record<string, string>> => {
+    const all = await loadSettings(context.tenant.id);
+    const entries = Object.entries(all).filter(
+      ([key]) => !key.startsWith("appBooking") && !key.startsWith(BLIP_SETTINGS_PREFIX),
+    );
+    return {
+      ...Object.fromEntries(entries),
+      tenantName: context.tenant.name,
+      tenantDomain: context.tenant.domain,
+    };
+  }),
+
+  /**
+   * Redirecionamento do agendamento para o aplicativo, configurado no painel.
+   * Só a página de agendamento usa isso — a home não mostra link nem QR Code.
+   */
+  appBooking: tenantBase.handler(async ({ context }) =>
+    readAppBooking(await loadSettings(context.tenant.id)),
+  ),
+
+  /**
+   * Dias em que a agenda abre: regra semanal, liberações pontuais feitas no
+   * painel e dias fechados por bloqueio. O calendário do site e do app usam
+   * isso para saber quais datas aceitar.
+   */
+  schedule: tenantBase.handler(async ({ context }) => {
+    const [rules, closedDates] = await Promise.all([
+      loadScheduleRules(context.tenant.id),
+      fullDayClosedDates(context.tenant.id),
+    ]);
+    return {
+      workDays: rules.workDays,
+      openDates: rules.openDates,
+      closedDates,
+      label: workDaysLabel(rules.workDays),
+    };
+  }),
 
   /** Blocos de 1h30 do dia, marcando quais estão ocupados/bloqueados. */
   availability: tenantBase.input(dateInput).handler(async ({ input, context }) => {
     const { date, barberId } = input;
     const tenantId = context.tenant.id;
-    const closed = isWeekend(date) || isPast(date);
+    const rules = await loadScheduleRules(tenantId);
+    const reason = closedReason(date, rules);
 
-    if (closed) {
+    if (reason) {
       return {
         date,
         closed: true,
-        reason: isWeekend(date)
-          ? "Atendemos de segunda a sexta-feira."
-          : "Essa data já passou.",
+        reason,
         slots: SLOTS.map((slot) => ({
           slot,
           range: slotRange(slot),
@@ -146,13 +194,14 @@ export const booking = {
     )
     .handler(async ({ input, context }) => {
       const tenantId = context.tenant.id;
-      if (isWeekend(input.date)) {
-        throw new ORPCError("BAD_REQUEST", {
-          message: "Atendemos apenas de segunda a sexta-feira.",
-        });
-      }
       if (isPast(input.date)) {
         throw new ORPCError("BAD_REQUEST", { message: "Escolha uma data futura." });
+      }
+      const rules = await loadScheduleRules(tenantId);
+      if (!isOpenDate(input.date, rules)) {
+        throw new ORPCError("BAD_REQUEST", {
+          message: `Não atendemos ${weekdayName(input.date)}. Atendemos ${workDaysLabel(rules.workDays)}.`,
+        });
       }
 
       const [service] = await db
@@ -226,6 +275,10 @@ export const booking = {
           status: "pending",
         })
         .returning();
+
+      // Espelha o horário no BlipBeauty (ele cuida do lembrete e da reativação).
+      // Fire and forget: uma falha lá nunca derruba o agendamento aqui.
+      if (created) void syncAppointmentToBlip(tenantId, created.id);
 
       const config = await loadSettings(tenantId);
       const whatsapp = normalizePhone(config.whatsapp ?? "");

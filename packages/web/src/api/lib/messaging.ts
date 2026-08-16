@@ -14,8 +14,9 @@ import { db } from "../database";
 import * as schema from "../database/schema";
 import { sendSms, SMS_DEV_MODE } from "./sms";
 import { normalizePhone } from "./schedule";
+import { BLIP_KEYS, isBlipReady, readBlipConfig, type BlipConfig } from "./blip";
 
-export type MessageChannel = "whatsapp" | "sms" | "manual";
+export type MessageChannel = "whatsapp" | "sms" | "blip" | "manual";
 export type MessageKind = "reminder" | "reactivation";
 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN ?? "";
@@ -35,6 +36,8 @@ export const MESSAGING_KEYS = {
   reactivationDays: "reactivationDays",
   reminderTemplate: "reminderTemplate",
   reactivationTemplate: "reactivationTemplate",
+  blipApiUrl: BLIP_KEYS.apiUrl,
+  blipApiKey: BLIP_KEYS.apiKey,
 } as const;
 
 export const DEFAULT_REMINDER_TEMPLATE =
@@ -53,6 +56,8 @@ export type MessagingConfig = {
   reactivationDays: number;
   reminderTemplate: string;
   reactivationTemplate: string;
+  /** Integração BlipBeauty (URL + API key salvas no painel). */
+  blip: BlipConfig;
 };
 
 const num = (value: string | undefined, fallback: number) => {
@@ -73,7 +78,8 @@ export async function messagingConfig(tenantId: number): Promise<MessagingConfig
 
   const provider = map[MESSAGING_KEYS.provider];
   return {
-    provider: provider === "whatsapp" || provider === "sms" ? provider : "manual",
+    provider:
+      provider === "whatsapp" || provider === "sms" || provider === "blip" ? provider : "manual",
     reminderEnabled: bool(map[MESSAGING_KEYS.reminderEnabled], true),
     reminderLeadMinutes: num(map[MESSAGING_KEYS.reminderLeadMinutes], 60),
     reactivationEnabled: bool(map[MESSAGING_KEYS.reactivationEnabled], true),
@@ -81,13 +87,18 @@ export async function messagingConfig(tenantId: number): Promise<MessagingConfig
     reminderTemplate: map[MESSAGING_KEYS.reminderTemplate]?.trim() || DEFAULT_REMINDER_TEMPLATE,
     reactivationTemplate:
       map[MESSAGING_KEYS.reactivationTemplate]?.trim() || DEFAULT_REACTIVATION_TEMPLATE,
+    blip: readBlipConfig(map),
   };
 }
 
-/** Canal realmente usável: cai para `manual` quando falta credencial. */
-export function resolveChannel(provider: MessageChannel): MessageChannel {
-  if (provider === "whatsapp") return WHATSAPP_READY ? "whatsapp" : "manual";
-  if (provider === "sms") return SMS_READY ? "sms" : "manual";
+/**
+ * Canal realmente usável: cai para `manual` quando falta credencial.
+ * O BlipBeauty depende da URL + API key salvas no painel da unidade.
+ */
+export function resolveChannel(config: Pick<MessagingConfig, "provider" | "blip">): MessageChannel {
+  if (config.provider === "whatsapp") return WHATSAPP_READY ? "whatsapp" : "manual";
+  if (config.provider === "sms") return SMS_READY ? "sms" : "manual";
+  if (config.provider === "blip") return isBlipReady(config.blip) ? "blip" : "manual";
   return "manual";
 }
 
@@ -134,7 +145,11 @@ export async function deliverMessage(
   channel: MessageChannel,
   to: string,
   body: string,
+  options: { blip?: BlipConfig; toName?: string; kind?: MessageKind } = {},
 ): Promise<boolean> {
+  // BlipBeauty não recebe "mande esta mensagem": ele recebe a agenda e dispara
+  // sozinho (ver lib/blip-sync.ts). Nada é enviado por aqui.
+  if (channel === "blip") return false;
   if (channel === "whatsapp") {
     await sendWhatsapp(to, body);
     return true;

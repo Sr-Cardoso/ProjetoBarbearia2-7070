@@ -23,8 +23,20 @@ export const tenantAdmins = sqliteTable(
       .notNull()
       .references(() => tenants.id),
     email: text("email").notNull(),
+    /** Nome de referência do convidado (só para o dono se localizar na lista). */
+    name: text("name").notNull().default(""),
     /** Super admin gerencia todas as unidades. */
     superAdmin: integer("super_admin", { mode: "boolean" }).notNull().default(false),
+    /**
+     * Áreas do painel liberadas para esse e-mail (CSV — ver `lib/permissions.ts`).
+     * Vazio = sem nenhuma aba. Super admin ignora o campo e vê tudo.
+     */
+    sections: text("sections").notNull().default(""),
+    /**
+     * Pode configurar a integração de plataforma de mensagens (BlipBeauty ou
+     * outra). Falso por padrão: convidado não vê URL nem API key.
+     */
+    canIntegrations: integer("can_integrations", { mode: "boolean" }).notNull().default(false),
     createdAt: integer("created_at", { mode: "timestamp" })
       .notNull()
       .$defaultFn(() => new Date()),
@@ -119,6 +131,29 @@ export const blocks = sqliteTable(
       .$defaultFn(() => new Date()),
   },
   (table) => [index("blocks_date_idx").on(table.date)],
+);
+
+/**
+ * Aberturas extraordinárias: libera um dia que estaria fechado pela regra
+ * semanal (setting `workDays`), para o dono abrir horários quando precisar.
+ */
+export const openDays = sqliteTable(
+  "open_days",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    tenantId: integer("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    date: text("date").notNull(),
+    reason: text("reason").notNull().default(""),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (table) => [
+    unique("open_days_tenant_date_uq").on(table.tenantId, table.date),
+    index("open_days_date_idx").on(table.date),
+  ],
 );
 
 /** Configurações simples chave/valor (whatsapp, endereço, textos). */

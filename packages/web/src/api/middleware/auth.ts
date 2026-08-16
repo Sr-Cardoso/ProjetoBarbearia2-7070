@@ -2,7 +2,8 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { ORPCError } from "@orpc/server";
 import { base } from "../__core/app";
 import { auth } from "../auth";
-import { isSuperAdmin, resolveTenant, tenantAdminEmails } from "../lib/tenant";
+import { resolveTenant, tenantAdminAccess } from "../lib/tenant";
+import { allSections, SECTION_LABELS, type Section } from "../lib/permissions";
 
 /**
  * Senha mestra do painel — vem SÓ do ambiente (`ADMIN_PASSWORD` no `.env` da
@@ -62,13 +63,25 @@ export type AdminContext = {
   email: string;
   superAdmin: boolean;
   via: "password" | "google";
+  /** Áreas do painel liberadas (super admin recebe todas). */
+  sections: Section[];
+  /** Pode mexer na integração de plataforma de mensagens. */
+  canIntegrations: boolean;
 };
 
 export const adminBase = tenantBase.use<{ admin: AdminContext }>(async ({ context, next }) => {
   const masterToken = context.headers.get("x-admin-token");
   if (safeTokenEqual(masterToken)) {
     return next({
-      context: { admin: { email: "senha-mestra", superAdmin: true, via: "password" } },
+      context: {
+        admin: {
+          email: "senha-mestra",
+          superAdmin: true,
+          via: "password",
+          sections: allSections(),
+          canIntegrations: true,
+        },
+      },
     });
   }
 
@@ -78,8 +91,8 @@ export const adminBase = tenantBase.use<{ admin: AdminContext }>(async ({ contex
     throw new ORPCError("UNAUTHORIZED", { message: "Acesso restrito." });
   }
 
-  const allowed = await tenantAdminEmails(context.tenant.id);
-  if (!allowed.includes(email)) {
+  const access = await tenantAdminAccess(context.tenant.id, email);
+  if (!access) {
     throw new ORPCError("FORBIDDEN", {
       message: `A conta ${email} não tem permissão nesta unidade.`,
     });
@@ -87,9 +100,43 @@ export const adminBase = tenantBase.use<{ admin: AdminContext }>(async ({ contex
 
   return next({
     context: {
-      admin: { email, superAdmin: await isSuperAdmin(email), via: "google" },
+      admin: {
+        email,
+        superAdmin: access.superAdmin,
+        via: "google" as const,
+        sections: access.sections,
+        canIntegrations: access.canIntegrations,
+      },
     },
   });
+});
+
+/**
+ * Exige pelo menos uma das áreas informadas. Serve para o convidado que só
+ * recebeu, por exemplo, "Agenda" não conseguir chamar a API de Produtos direto,
+ * mesmo com a aba escondida no painel.
+ */
+export function adminSections(...sections: [Section, ...Section[]]) {
+  return adminBase.use(async ({ context, next }) => {
+    const allowed = sections.some((section) => context.admin.sections.includes(section));
+    if (!allowed) {
+      const labels = sections.map((section) => SECTION_LABELS[section]).join(" ou ");
+      throw new ORPCError("FORBIDDEN", {
+        message: `Sua conta não tem acesso a ${labels}.`,
+      });
+    }
+    return next();
+  });
+}
+
+/** Exige o direito de configurar integrações (BlipBeauty ou outra plataforma). */
+export const integrationsBase = adminBase.use(async ({ context, next }) => {
+  if (!context.admin.canIntegrations) {
+    throw new ORPCError("FORBIDDEN", {
+      message: "Só o dono da conta configura a integração de plataformas de mensagem.",
+    });
+  }
+  return next();
 });
 
 /** Cliente logado (opcional) — `context.user` é a conta ou null. */

@@ -13,6 +13,16 @@ export function useShopSettings() {
   return useQuery(orpc.booking.settings.queryOptions({ staleTime: 60_000 }));
 }
 
+/** Dias de atendimento + liberações/fechamentos do painel. */
+export function useSchedule() {
+  return useQuery(
+    orpc.booking.schedule.queryOptions({
+      staleTime: 0,
+      refetchOnMount: "always",
+    }),
+  );
+}
+
 export function useAvailability(date: string | null, barberId?: number) {
   return useQuery(
     orpc.booking.availability.queryOptions({

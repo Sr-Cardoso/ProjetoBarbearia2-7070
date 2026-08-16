@@ -1,6 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "../database";
 import * as schema from "../database/schema";
+import { allSections, parseSections, type Section } from "./permissions";
 
 export interface TenantConfig {
   id: number;
@@ -67,6 +68,37 @@ export async function tenantAdminEmails(tenantId: number): Promise<string[]> {
   return rows
     .filter((r) => r.superAdmin || r.tenantId === tenantId)
     .map((r) => r.email.toLowerCase());
+}
+
+/**
+ * Acesso de um e-mail na unidade: nível (super admin ou convidado), áreas
+ * liberadas e direito de configurar integrações. `null` = não autorizado.
+ *
+ * Super admin passa por cima do cadastro de áreas (vê tudo, em qualquer
+ * unidade); convidado vê só o que foi marcado no painel.
+ */
+export async function tenantAdminAccess(
+  tenantId: number,
+  email: string,
+): Promise<{ superAdmin: boolean; sections: Section[]; canIntegrations: boolean } | null> {
+  const normalized = email.trim().toLowerCase();
+  const rows = await db
+    .select()
+    .from(schema.tenantAdmins)
+    .where(eq(schema.tenantAdmins.email, normalized));
+  if (rows.length === 0) return null;
+
+  if (rows.some((row) => row.superAdmin)) {
+    return { superAdmin: true, sections: allSections(), canIntegrations: true };
+  }
+
+  const row = rows.find((item) => item.tenantId === tenantId);
+  if (!row) return null;
+  return {
+    superAdmin: false,
+    sections: parseSections(row.sections),
+    canIntegrations: row.canIntegrations,
+  };
 }
 
 /** Valida se um e-mail tem privilégio de administrador no domínio consultado. */

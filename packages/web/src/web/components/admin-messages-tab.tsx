@@ -11,6 +11,8 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { AdminBlipCard } from "./admin-blip-card";
+import { AdminIntegrationCard } from "./admin-integration-card";
 import {
   useCancelMessage,
   useMarkMessageSent,
@@ -52,6 +54,11 @@ const PROVIDERS = [
     hint: "Envio automático pela API oficial da Meta.",
   },
   { key: "sms", label: "SMS (Twilio)", hint: "Envio automático por SMS." },
+  {
+    key: "blip",
+    label: "BlipBeauty",
+    hint: "Envio automático pela API do BlipBeauty (configurada abaixo).",
+  },
 ] as const;
 
 type Provider = (typeof PROVIDERS)[number]["key"];
@@ -159,11 +166,15 @@ export function AdminMessagesTab() {
           <div className="space-y-7 px-6 py-6">
             <div>
               <span className="eyebrow text-[10px] text-muted-foreground">Como enviar</span>
-              <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 {PROVIDERS.map((provider) => {
                   const ready =
                     provider.key === "manual" ||
-                    (provider.key === "whatsapp" ? info?.whatsappReady : info?.smsReady);
+                    (provider.key === "whatsapp"
+                      ? info?.whatsappReady
+                      : provider.key === "sms"
+                        ? info?.smsReady
+                        : info?.blipReady);
                   return (
                     <button
                       key={provider.key}
@@ -180,7 +191,10 @@ export function AdminMessagesTab() {
                       <p className="mt-1 text-[12px] text-muted-foreground">{provider.hint}</p>
                       {!ready && (
                         <p className="mt-2 inline-flex items-center gap-1 text-[11px] text-amber-300">
-                          <AlertTriangle className="size-3" /> sem credencial no servidor
+                          <AlertTriangle className="size-3" />
+                          {provider.key === "blip"
+                            ? "cadastre a API key abaixo"
+                            : "sem credencial no servidor"}
                         </p>
                       )}
                     </button>
@@ -314,6 +328,9 @@ export function AdminMessagesTab() {
           </div>
         )}
       </section>
+
+      {/* Credencial da plataforma só para quem tem direito de integração. */}
+      {config.data?.canIntegrations ? <AdminBlipCard /> : <AdminIntegrationCard />}
 
       <section className="bg-card">
         <div className="border-b border-border px-6 py-5">

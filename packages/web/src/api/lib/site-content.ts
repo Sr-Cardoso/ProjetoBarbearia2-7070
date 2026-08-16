@@ -165,7 +165,7 @@ export const DEFAULT_CONTENT: SiteContent = {
   },
   hero: {
     enabled: true,
-    eyebrow: "Seg — Sex · 08h às 18h",
+    eyebrow: "Seg — Sáb · 08h às 18h",
     title: "Seu horário na cadeira certa,",
     titleAccent: "sem espera.",
     text: "Escolha o serviço, o profissional e o horário. A agenda é atualizada em tempo real — o que aparece disponível está realmente livre.",
@@ -275,7 +275,7 @@ export const DEFAULT_CONTENT: SiteContent = {
     enabled: true,
     eyebrow: "Vamos nessa",
     title: "Escolha seu horário agora",
-    text: "A agenda abre 6 horários por dia, de segunda a sexta. Depois de confirmar, você recebe a mensagem pronta para enviar no nosso WhatsApp.",
+    text: "A agenda abre 6 horários por dia nos dias de atendimento. Depois de confirmar, você recebe a mensagem pronta para enviar no nosso WhatsApp.",
     image: "/images/cta.jpg",
     primaryLabel: "Agendar horário",
     secondaryLabel: "Falar com a barbearia",
@@ -286,8 +286,7 @@ export const DEFAULT_CONTENT: SiteContent = {
     ctaLabel: "Agendar horário",
     hoursTitle: "Funcionamento",
     hours: [
-      { day: "Seg — Sex", time: "08:00 — 18:00" },
-      { day: "Sábado", time: "Fechado" },
+      { day: "Seg — Sáb", time: "08:00 — 18:00" },
       { day: "Domingo", time: "Fechado" },
     ],
     note: "Atendimentos em blocos de 1h30",

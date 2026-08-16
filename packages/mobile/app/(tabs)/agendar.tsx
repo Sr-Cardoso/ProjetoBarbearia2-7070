@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -15,13 +15,19 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useColors } from "@/hooks/use-colors";
 import { Fonts } from "@/constants/theme";
-import { useAvailability, useBarbers, useCreateBooking, useServices } from "@/queries/booking";
+import {
+  useAvailability,
+  useBarbers,
+  useCreateBooking,
+  useSchedule,
+  useServices,
+} from "@/queries/booking";
 import {
   dayMonth,
   formatDateLong,
   formatPrice,
   maskPhone,
-  nextWeekdays,
+  nextOpenDays,
   weekdayShort,
 } from "@/lib/format";
 
@@ -39,7 +45,8 @@ export default function Agendar() {
   const barbers = useBarbers();
   const createBooking = useCreateBooking();
 
-  const days = useMemo(() => nextWeekdays(12), []);
+  const schedule = useSchedule();
+  const days = useMemo(() => nextOpenDays(12, schedule.data), [schedule.data]);
   const [serviceId, setServiceId] = useState<number | null>(null);
   const [barberId, setBarberId] = useState<number | null>(null);
   const [date, setDate] = useState<string>(days[0] ?? "");
@@ -51,6 +58,15 @@ export default function Agendar() {
 
   const availability = useAvailability(date, barberId ?? undefined);
   const service = services.data?.find((s) => s.id === serviceId);
+
+  // A lista de dias muda quando o painel libera/fecha datas — mantém a
+  // seleção sempre em um dia que ainda aceita agendamento.
+  useEffect(() => {
+    if (days.length > 0 && !days.includes(date)) {
+      setDate(days[0]);
+      setSlot(null);
+    }
+  }, [days, date]);
 
   const ready =
     serviceId !== null &&
@@ -254,6 +270,13 @@ export default function Agendar() {
           {/* 3 data */}
           <View style={{ gap: 10 }}>
             <Step n={3} label="Data" colors={colors} />
+            {!schedule.data && (
+              <Text style={{ color: colors.mutedForeground, fontFamily: Fonts.sans }}>
+                {schedule.isError
+                  ? "Não foi possível carregar os dias de atendimento."
+                  : "Carregando os dias de atendimento…"}
+              </Text>
+            )}
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               {days.map((iso) => {
                 const active = date === iso;

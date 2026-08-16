@@ -39,38 +39,57 @@ export function formatDateLong(iso: string): string {
   });
 }
 
-export function isWeekendISO(iso: string): boolean {
-  const day = new Date(`${iso}T12:00:00`).getDay();
-  return day === 0 || day === 6;
-}
-
 export interface CalendarCell {
   iso: string;
   day: number;
   currentMonth: boolean;
   disabled: boolean;
+  /** Dia aberto por liberação do painel, fora dos dias fixos de atendimento. */
+  released: boolean;
 }
 
 export const WEEKDAY_INITIALS = ["D", "S", "T", "Q", "Q", "S", "S"];
 
-/** Grade de 6 semanas para o mês, desabilitando passado e fins de semana. */
-export function buildCalendar(year: number, month: number): CalendarCell[] {
+/** Dias de atendimento, liberações e fechamentos vindos da API (booking.schedule). */
+export interface ScheduleRules {
+  workDays: number[];
+  openDates: string[];
+  closedDates: string[];
+}
+
+/**
+ * Grade de 6 semanas para o mês. Desabilita o passado, os dias fora dos dias
+ * de atendimento e as datas fechadas no painel — liberações pontuais abrem.
+ *
+ * As regras vêm sempre do servidor: sem elas nada é riscado por dia da semana,
+ * para o calendário nunca inventar um "seg–sex" que o painel não configurou.
+ */
+export function buildCalendar(
+  year: number,
+  month: number,
+  rules?: ScheduleRules,
+): CalendarCell[] {
   const first = new Date(year, month, 1);
   const start = new Date(first);
   start.setDate(1 - first.getDay());
 
   const today = todayISO();
+  const openDates = new Set(rules?.openDates ?? []);
+  const closedDates = new Set(rules?.closedDates ?? []);
   const cells: CalendarCell[] = [];
 
   for (let i = 0; i < 42; i++) {
     const date = new Date(start);
     date.setDate(start.getDate() + i);
     const iso = toISODate(date);
+    const released = openDates.has(iso);
+    const openByRule = rules ? released || rules.workDays.includes(date.getDay()) : true;
     cells.push({
       iso,
       day: date.getDate(),
       currentMonth: date.getMonth() === month,
-      disabled: iso < today || isWeekendISO(iso),
+      disabled: iso < today || closedDates.has(iso) || !openByRule,
+      released,
     });
   }
   return cells;

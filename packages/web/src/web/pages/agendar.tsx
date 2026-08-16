@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
 import {
   ArrowLeft,
@@ -11,6 +11,7 @@ import {
   Loader2,
   MessageCircle,
   Scissors,
+  Smartphone,
   User,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -19,7 +20,9 @@ import { SiteFooter } from "../components/site-footer";
 import { SiteTheme } from "../components/site-theme";
 import { useSiteContent } from "../queries/content";
 import {
+  useAppBooking,
   useAvailability,
+  useSchedule,
   useBarbers,
   useCreateBooking,
   useServices,
@@ -59,12 +62,31 @@ export default function Agendar() {
   const [cursor, setCursor] = useState({ year: today.getFullYear(), month: today.getMonth() });
 
   const content = useSiteContent();
+  const appBooking = useAppBooking();
   const services = useServices();
   const barbers = useBarbers();
   const availability = useAvailability(step === 2 ? date : null, barberId ?? undefined);
+  const schedule = useSchedule();
   const createBooking = useCreateBooking();
 
-  const cells = useMemo(() => buildCalendar(cursor.year, cursor.month), [cursor]);
+  const cells = useMemo(
+    () => buildCalendar(cursor.year, cursor.month, schedule.data),
+    [cursor, schedule.data],
+  );
+  const daysLabel = schedule.data?.label ?? "";
+
+  // Redirecionamento para o aplicativo, configurado no painel. "redirect" manda
+  // direto; "invite" mostra o convite e deixa continuar no site.
+  const app = appBooking.data;
+  const [stayOnSite, setStayOnSite] = useState(false);
+  const showAppGate = Boolean(app && app.mode !== "off" && app.url) && !stayOnSite;
+  const autoRedirect = Boolean(app && app.mode === "redirect" && app.url);
+
+  useEffect(() => {
+    if (!autoRedirect || stayOnSite || !app?.url) return;
+    window.location.replace(app.url);
+  }, [autoRedirect, stayOnSite, app?.url]);
+  const hasReleased = cells.some((cell) => cell.released && cell.currentMonth && !cell.disabled);
   const service = services.data?.find((s) => s.id === serviceId);
   const barber = barbers.data?.find((b) => b.id === barberId);
 
@@ -167,6 +189,47 @@ export default function Agendar() {
     );
   }
 
+  if (showAppGate && app) {
+    return (
+      <div className="min-h-screen bg-surface">
+        <SiteTheme content={content} />
+        <SiteHeader />
+        <section className="hero-gradient noise px-5 pt-32 pb-24 lg:px-8">
+          <div className="mx-auto max-w-xl text-center text-white">
+            <span className="rise d1 mx-auto grid size-16 place-items-center bg-card/15">
+              <Smartphone className="size-8" strokeWidth={2} />
+            </span>
+            <h1 className="rise d2 mt-8 font-display text-4xl md:text-5xl">
+              {autoRedirect ? "Abrindo o aplicativo" : app.title}
+            </h1>
+            <p className="rise d3 mt-4 text-white/80">
+              {autoRedirect
+                ? "Estamos levando você para o nosso aplicativo para escolher o horário."
+                : app.text}
+            </p>
+            <div className="rise d4 mt-10 flex flex-col items-center gap-4">
+              <a
+                href={app.url}
+                className="inline-flex items-center justify-center gap-2 bg-card px-8 py-4 text-[11px] font-semibold tracking-[0.18em] text-foreground uppercase transition-colors hover:bg-primary hover:text-white"
+              >
+                <Smartphone className="size-4" />
+                {autoRedirect ? "Abrir agora" : "Abrir o aplicativo"}
+              </a>
+              <button
+                type="button"
+                onClick={() => setStayOnSite(true)}
+                className="text-xs tracking-[0.14em] text-white/70 uppercase underline underline-offset-4 hover:text-white"
+              >
+                {autoRedirect ? "Não abriu? Agendar aqui no site" : "Prefiro agendar aqui no site"}
+              </button>
+            </div>
+          </div>
+        </section>
+        <SiteFooter />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-surface">
       <SiteTheme content={content} />
@@ -179,7 +242,7 @@ export default function Agendar() {
             Escolha o serviço e garanta seu horário
           </h1>
           <p className="rise d3 mt-4 max-w-xl text-white/80">
-            Atendemos de segunda a sexta, das 08:00 às 18:00, em blocos de 1h30. Horários já
+            Atendemos {daysLabel}, das 08:00 às 18:00, em blocos de 1h30. Horários já
             reservados desaparecem da lista automaticamente.
           </p>
         </div>
@@ -334,7 +397,12 @@ export default function Agendar() {
                       </button>
                     </div>
 
-                    <div className="mt-4 grid grid-cols-7 gap-1 text-center">
+                    <div
+                      className={cn(
+                        "mt-4 grid grid-cols-7 gap-1 text-center transition-opacity",
+                        !schedule.data && "pointer-events-none opacity-40",
+                      )}
+                    >
                       {WEEKDAY_INITIALS.map((d, i) => (
                         <span
                           key={`${d}-${i}`}
@@ -358,6 +426,9 @@ export default function Agendar() {
                             cell.disabled
                               ? "cursor-not-allowed text-muted-foreground/35 line-through"
                               : "text-foreground hover:bg-secondary",
+                            !cell.disabled &&
+                              cell.released &&
+                              "font-semibold text-primary underline decoration-dotted underline-offset-4",
                             date === cell.iso && "bg-primary text-white hover:bg-primary",
                           )}
                         >
@@ -365,9 +436,27 @@ export default function Agendar() {
                         </button>
                       ))}
                     </div>
-                    <p className="mt-3 text-xs text-muted-foreground">
-                      Fins de semana fechados. Seg a sex, 08:00–18:00.
-                    </p>
+                    {schedule.data ? (
+                      <p className="mt-3 text-xs text-muted-foreground">
+                        Atendemos {daysLabel}, 08:00–18:00. Dias riscados estão fechados.
+                        {hasReleased && " Datas em destaque são aberturas extras."}
+                      </p>
+                    ) : schedule.isError ? (
+                      <p className="mt-3 flex flex-wrap items-center gap-3 text-xs text-destructive">
+                        Não foi possível carregar os dias de atendimento.
+                        <button
+                          type="button"
+                          onClick={() => schedule.refetch()}
+                          className="border border-destructive px-3 py-1 text-[10px] font-semibold tracking-[0.14em] uppercase"
+                        >
+                          Tentar de novo
+                        </button>
+                      </p>
+                    ) : (
+                      <p className="mt-3 text-xs text-muted-foreground">
+                        Carregando os dias de atendimento…
+                      </p>
+                    )}
                   </div>
                 </div>
 

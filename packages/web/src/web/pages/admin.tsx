@@ -15,10 +15,10 @@ import {
   Scissors,
   Settings,
   Trash2,
+  Unlock,
   Users,
   X,
   Building2,
-  Mail,
   ShieldCheck,
   LayoutTemplate,
   Package,
@@ -27,12 +27,17 @@ import {
   ShoppingCart,
 } from "lucide-react";
 import { SiteTab } from "../components/site-tab";
+import { AdminAppLinkCard } from "../components/admin-app-link-card";
+import { AdminBlipCard } from "../components/admin-blip-card";
+import { AdminIntegrationCard } from "../components/admin-integration-card";
+import { AdminAccessCard } from "../components/admin-access-card";
 import { AdminProductsTab } from "../components/admin-products-tab";
 import { AdminOrdersTab } from "../components/admin-orders-tab";
 import { AdminMessagesTab } from "../components/admin-messages-tab";
 import { AdminServicesTab } from "../components/admin-services-tab";
 import { AdminBarbersTab } from "../components/admin-barbers-tab";
 import { useAgendaTotals } from "../queries/store";
+import { useSchedule } from "../queries/booking";
 import { cn } from "@/lib/utils";
 import { setAdminToken } from "../lib/api";
 import { authClient } from "../lib/auth";
@@ -43,17 +48,20 @@ import {
   useAgenda,
   useAllBarbers,
   useBlocks,
+  useCloseDay,
   useCreateBlock,
+  useDayStatus,
+  useOpenDay,
+  useReleasedDays,
   useRemoveAppointment,
   useRemoveBlock,
   useSaveSettings,
   useSetStatus,
+  useSetWorkDays,
   useUpcoming,
   useTenants,
   useSaveTenant,
   useRemoveTenant,
-  useAddTenantAdmin,
-  useRemoveTenantAdmin,
 } from "../queries/admin";
 import { getAdminToken } from "../lib/api";
 import {
@@ -89,7 +97,7 @@ const STATUS_STYLES: Record<string, string> = {
 };
 
 export default function Admin() {
-  const [tab, setTab] = useState<TabKey>("agenda");
+  const [tab, setTab] = useState<TabKey | null>(null);
   const session = useAdminSession();
 
   if (session.isPending) {
@@ -105,7 +113,17 @@ export default function Admin() {
     return <Login session={data ?? null} onDone={() => session.refetch()} />;
   }
 
-  const visibleTabs = TABS.filter((t) => t.key !== "unidades" || data.superAdmin);
+  /**
+   * Abas visíveis: "Unidades" é só do super admin e as demais seguem as áreas
+   * liberadas para o e-mail (`session.sections`). A API também confere — esconder
+   * a aba é conveniência, não é a trava.
+   */
+  const allowed = new Set<string>(data.sections);
+  const visibleTabs = TABS.filter((t) =>
+    t.key === "unidades" ? data.superAdmin : allowed.has(t.key),
+  );
+  const current: TabKey | null =
+    tab && visibleTabs.some((t) => t.key === tab) ? tab : (visibleTabs[0]?.key ?? null);
 
   async function signOut() {
     setAdminToken(null);
@@ -153,7 +171,7 @@ export default function Admin() {
               onClick={() => setTab(t.key)}
               className={cn(
                 "inline-flex shrink-0 items-center gap-2 px-4 py-3 text-[11px] font-semibold tracking-[0.16em] uppercase transition-colors",
-                tab === t.key
+                current === t.key
                   ? "bg-surface text-foreground"
                   : "text-white/60 hover:bg-primary/10 hover:text-white",
               )}
@@ -165,16 +183,22 @@ export default function Admin() {
       </header>
 
       <main className="mx-auto max-w-6xl px-5 py-10 lg:px-8">
-        {tab === "agenda" && <AgendaTab />}
-        {tab === "servicos" && <AdminServicesTab />}
-        {tab === "barbeiros" && <AdminBarbersTab />}
-        {tab === "bloqueios" && <BlocksTab />}
-        {tab === "produtos" && <AdminProductsTab />}
-        {tab === "pedidos" && <AdminOrdersTab />}
-        {tab === "mensagens" && <AdminMessagesTab />}
-        {tab === "site" && <SiteTab />}
-        {tab === "config" && <SettingsTab />}
-        {tab === "unidades" && data.superAdmin && <TenantsTab />}
+        {current === null && (
+          <p className="bg-card p-8 text-sm text-muted-foreground">
+            Sua conta ainda não tem nenhuma área liberada. Peça ao dono da barbearia para liberar o
+            acesso no painel (aba Unidades).
+          </p>
+        )}
+        {current === "agenda" && <AgendaTab />}
+        {current === "servicos" && <AdminServicesTab />}
+        {current === "barbeiros" && <AdminBarbersTab />}
+        {current === "bloqueios" && <BlocksTab />}
+        {current === "produtos" && <AdminProductsTab />}
+        {current === "pedidos" && <AdminOrdersTab />}
+        {current === "mensagens" && <AdminMessagesTab />}
+        {current === "site" && <SiteTab />}
+        {current === "config" && <SettingsTab canIntegrations={data.canIntegrations} />}
+        {current === "unidades" && data.superAdmin && <TenantsTab />}
       </main>
     </div>
   );
@@ -187,6 +211,8 @@ type SessionData = {
   via: "google" | "password" | null;
   email: string | null;
   superAdmin: boolean;
+  sections?: string[];
+  canIntegrations?: boolean;
   tenant: { id: number; name: string; domain: string };
 } | null;
 
@@ -369,6 +395,8 @@ function AgendaTab() {
           </div>
         </div>
 
+        <DayGateBanner date={date} />
+
         {agenda.isLoading ? (
           <Spinner />
         ) : agenda.data && agenda.data.length > 0 ? (
@@ -501,7 +529,197 @@ function AgendaTab() {
   );
 }
 
+/**
+ * Situação do dia com as ações de abrir/fechar a agenda. "Liberar este dia"
+ * apaga o bloqueio de dia inteiro e, quando a data cai fora dos dias de
+ * atendimento, registra uma abertura extra só para ela.
+ */
+function DayGateBanner({ date }: { date: string }) {
+  const status = useDayStatus(date);
+  const openDay = useOpenDay();
+  const closeDay = useCloseDay();
+  const data = status.data;
+  if (!data) return null;
+
+  const busy = openDay.isPending || closeDay.isPending;
+  const error = openDay.error ?? closeDay.error;
+  const message = data.open
+    ? data.released
+      ? `Aberto por liberação sua — ${data.weekday} não é dia fixo de atendimento.`
+      : "Agenda aberta: os clientes podem escolher horários neste dia."
+    : data.blockedFullDay
+      ? "Dia bloqueado: nenhum horário aparece para o cliente."
+      : `Fechado: não atendemos ${data.weekday}. Atendemos ${data.workDaysLabel}.`;
+
+  return (
+    <div
+      className={cn(
+        "flex flex-wrap items-center justify-between gap-3 border-b border-border px-6 py-4",
+        data.open ? "bg-emerald-500/[0.06]" : "bg-amber-500/[0.06]",
+      )}
+    >
+      <div className="flex items-start gap-2.5">
+        {data.open ? (
+          <Unlock className="mt-0.5 size-4 shrink-0 text-emerald-300" />
+        ) : (
+          <Lock className="mt-0.5 size-4 shrink-0 text-amber-300" />
+        )}
+        <div className="text-sm">
+          <p className="text-foreground">{message}</p>
+          {data.blockedSlots > 0 && (
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {data.blockedSlots} horário(s) bloqueado(s) individualmente — remova na aba Bloqueios.
+            </p>
+          )}
+          {error && <p className="mt-0.5 text-xs text-destructive">{error.message}</p>}
+        </div>
+      </div>
+      {data.past ? (
+        <span className="text-[11px] tracking-[0.14em] text-muted-foreground uppercase">
+          Data passada
+        </span>
+      ) : data.open ? (
+        <MiniButton disabled={busy} onClick={() => closeDay.mutate({ date, reason: "" })}>
+          <Lock className="size-3.5" /> Fechar este dia
+        </MiniButton>
+      ) : (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => openDay.mutate({ date, reason: "" })}
+          className="inline-flex items-center gap-2 bg-primary px-4 py-2.5 text-[11px] font-semibold tracking-[0.16em] text-white uppercase transition-colors hover:bg-primary-dark disabled:opacity-40"
+        >
+          <Unlock className="size-3.5" /> Liberar este dia
+        </button>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------ bloqueios */
+
+const WEEKDAY_OPTIONS = [
+  { day: 1, label: "Seg" },
+  { day: 2, label: "Ter" },
+  { day: 3, label: "Qua" },
+  { day: 4, label: "Qui" },
+  { day: 5, label: "Sex" },
+  { day: 6, label: "Sáb" },
+  { day: 0, label: "Dom" },
+];
+
+function sameDays(a: number[], b: number[]): boolean {
+  const key = (days: number[]) => [...days].sort((x, y) => x - y).join(",");
+  return key(a) === key(b);
+}
+
+/** Dias fixos de atendimento da semana — base do calendário do site e do app. */
+function WorkDaysCard() {
+  const schedule = useSchedule();
+  const save = useSetWorkDays();
+  const [draft, setDraft] = useState<number[] | null>(null);
+
+  const saved = schedule.data?.workDays ?? [1, 2, 3, 4, 5];
+  const current = draft ?? saved;
+  const dirty = !sameDays(current, saved);
+
+  function toggle(day: number) {
+    setDraft(current.includes(day) ? current.filter((d) => d !== day) : [...current, day]);
+  }
+
+  return (
+    <section className="bg-card">
+      <div className="border-b border-border px-6 py-5">
+        <h2 className="font-display text-xl">Dias de atendimento</h2>
+        <p className="text-sm text-muted-foreground">
+          Os dias marcados abrem horários automaticamente no site e no app. Para abrir só uma data
+          fora desses dias, use “Liberar este dia” na aba Agenda.
+        </p>
+      </div>
+      <div className="px-6 py-5">
+        <div className="flex flex-wrap gap-2">
+          {WEEKDAY_OPTIONS.map((option) => {
+            const on = current.includes(option.day);
+            return (
+              <button
+                key={option.day}
+                type="button"
+                onClick={() => toggle(option.day)}
+                className={cn(
+                  "border px-4 py-2.5 text-[11px] font-semibold tracking-[0.14em] uppercase transition-colors",
+                  on
+                    ? "border-primary bg-primary text-white"
+                    : "border-border text-muted-foreground hover:bg-secondary",
+                )}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+        <p className="mt-4 text-sm text-muted-foreground">
+          Atualmente: <span className="text-foreground">{schedule.data?.label ?? "—"}</span>
+        </p>
+        {save.error && <p className="mt-2 text-xs text-destructive">{save.error.message}</p>}
+        <div className="mt-5 flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={!dirty || current.length === 0 || save.isPending}
+            onClick={() => save.mutate({ days: current }, { onSuccess: () => setDraft(null) })}
+            className="inline-flex items-center gap-2 bg-primary px-6 py-3 text-[11px] font-semibold tracking-[0.18em] text-white uppercase transition-colors hover:bg-primary-dark disabled:opacity-40"
+          >
+            <Check className="size-4" /> Salvar dias
+          </button>
+          {dirty && (
+            <MiniButton onClick={() => setDraft(null)}>
+              <X className="size-3.5" /> Desfazer
+            </MiniButton>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/** Datas abertas por exceção (fora dos dias fixos), com opção de fechar. */
+function ReleasedDaysCard() {
+  const released = useReleasedDays();
+  const closeDay = useCloseDay();
+
+  return (
+    <section className="bg-card">
+      <div className="border-b border-border px-6 py-5">
+        <h2 className="font-display text-xl">Dias liberados</h2>
+        <p className="text-sm text-muted-foreground">
+          Datas abertas manualmente, mesmo fora dos dias de atendimento.
+        </p>
+      </div>
+      {released.isLoading ? (
+        <Spinner />
+      ) : released.data && released.data.length > 0 ? (
+        <ul className="divide-y divide-border">
+          {released.data.map((row) => (
+            <li key={row.id} className="flex flex-wrap items-center gap-4 px-6 py-4">
+              <p className="w-28 font-medium">{formatDateBr(row.date)}</p>
+              <p className="min-w-32 flex-1 text-sm text-muted-foreground capitalize">
+                {formatDateLong(row.date)}
+                {row.reason ? ` · ${row.reason}` : ""}
+              </p>
+              <MiniButton
+                disabled={closeDay.isPending}
+                onClick={() => closeDay.mutate({ date: row.date, reason: "" })}
+              >
+                <Lock className="size-3.5" /> Fechar
+              </MiniButton>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <Empty>Nenhum dia liberado por exceção.</Empty>
+      )}
+    </section>
+  );
+}
 
 function BlocksTab() {
   const blocks = useBlocks();
@@ -524,7 +742,13 @@ function BlocksTab() {
   }
 
   return (
-    <div className="grid gap-8 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,0.9fr)]">
+    <div className="space-y-8">
+      <div className="grid gap-8 lg:grid-cols-2">
+        <WorkDaysCard />
+        <ReleasedDaysCard />
+      </div>
+
+      <div className="grid gap-8 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,0.9fr)]">
       <section className="bg-card">
         <div className="border-b border-border px-6 py-5">
           <h2 className="font-display text-xl">Bloqueios de agenda</h2>
@@ -613,6 +837,7 @@ function BlocksTab() {
           <Lock className="size-4" /> Bloquear
         </button>
       </form>
+      </div>
     </div>
   );
 }
@@ -629,7 +854,22 @@ const SETTING_FIELDS = [
   { key: "hours", label: "Horário de funcionamento" },
 ];
 
-function SettingsTab() {
+/**
+ * Configurações. A integração de plataforma de mensagens só aparece para quem
+ * tem esse direito; os demais veem o cartão de pedido (`AdminIntegrationCard`),
+ * com o botão para integrar o BlipBeauty ou outra plataforma no futuro.
+ */
+function SettingsTab({ canIntegrations }: { canIntegrations: boolean }) {
+  return (
+    <div className="space-y-6">
+      <ShopSettingsCard />
+      <AdminAppLinkCard />
+      {canIntegrations ? <AdminBlipCard /> : <AdminIntegrationCard />}
+    </div>
+  );
+}
+
+function ShopSettingsCard() {
   const settings = useAdminSettings();
   const save = useSaveSettings();
   const [draft, setDraft] = useState<Record<string, string> | null>(null);
@@ -680,10 +920,7 @@ function TenantsTab() {
   const tenants = useTenants();
   const save = useSaveTenant();
   const remove = useRemoveTenant();
-  const addAdmin = useAddTenantAdmin();
-  const removeAdmin = useRemoveTenantAdmin();
   const [form, setForm] = useState({ domain: "", name: "" });
-  const [adminForm, setAdminForm] = useState<Record<number, string>>({});
 
   function add(e: React.FormEvent) {
     e.preventDefault();
@@ -700,7 +937,8 @@ function TenantsTab() {
         <div className="border-b border-border px-6 py-5">
           <h2 className="font-display text-xl">Unidades</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            Cada domínio tem agenda, serviços e barbeiros próprios.
+            Cada domínio tem agenda, serviços e barbeiros próprios. Libere abaixo quais áreas do
+            painel cada usuário convidado pode abrir.
           </p>
         </div>
         {tenants.isLoading ? (
@@ -744,59 +982,11 @@ function TenantsTab() {
                   </MiniButton>
                 </div>
 
-                <div className="mt-4 border border-border p-4">
-                  <p className="eyebrow flex items-center gap-2 text-[10px] text-muted-foreground">
-                    <ShieldCheck className="size-3.5 text-primary" /> Administradores
-                  </p>
-                  {t.admins.length > 0 ? (
-                    <ul className="mt-3 space-y-2">
-                      {t.admins.map((a) => (
-                        <li key={a.id} className="flex flex-wrap items-center gap-3 text-sm">
-                          <Mail className="size-3.5 text-muted-foreground" />
-                          <span className="flex-1 text-foreground">{a.email}</span>
-                          {a.superAdmin && (
-                            <span className="inline-flex items-center gap-1 bg-primary/15 px-2 py-1 text-[10px] font-semibold tracking-[0.14em] text-primary uppercase">
-                              <BadgeCheck className="size-3" /> super
-                            </span>
-                          )}
-                          <MiniButton danger onClick={() => removeAdmin.mutate({ id: a.id })}>
-                            <X className="size-3.5" />
-                          </MiniButton>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="mt-3 text-sm text-muted-foreground">
-                      Nenhum e-mail autorizado ainda.
-                    </p>
-                  )}
-                  <form
-                    className="mt-4 flex flex-wrap gap-3"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      const email = (adminForm[t.id] ?? "").trim();
-                      if (!email) return;
-                      addAdmin.mutate(
-                        { tenantId: t.id, email, superAdmin: false },
-                        { onSuccess: () => setAdminForm((prev) => ({ ...prev, [t.id]: "" })) },
-                      );
-                    }}
-                  >
-                    <input
-                      value={adminForm[t.id] ?? ""}
-                      onChange={(e) => setAdminForm((prev) => ({ ...prev, [t.id]: e.target.value }))}
-                      placeholder="email@gmail.com"
-                      className="min-w-56 flex-1 border border-input px-4 py-2.5 text-sm outline-none focus:border-primary"
-                    />
-                    <button
-                      type="submit"
-                      disabled={addAdmin.isPending}
-                      className="inline-flex items-center gap-2 bg-primary px-4 py-2.5 text-[10px] font-semibold tracking-[0.16em] text-white uppercase transition-colors hover:bg-primary-dark disabled:opacity-40"
-                    >
-                      <Plus className="size-3.5" /> Autorizar
-                    </button>
-                  </form>
-                </div>
+                <AdminAccessCard
+                  tenantId={t.id}
+                  admins={t.admins}
+                  integrationRequest={t.integrationRequest}
+                />
               </li>
             ))}
           </ul>
@@ -900,17 +1090,20 @@ function MiniButton({
   children,
   onClick,
   danger,
+  disabled,
 }: {
   children: React.ReactNode;
   onClick: () => void;
   danger?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       className={cn(
-        "inline-flex items-center gap-1.5 border px-3 py-1.5 text-[10px] font-semibold tracking-[0.14em] uppercase transition-colors",
+        "inline-flex items-center gap-1.5 border px-3 py-1.5 text-[10px] font-semibold tracking-[0.14em] uppercase transition-colors disabled:opacity-40",
         danger
           ? "border-destructive/30 text-destructive hover:bg-destructive/10"
           : "border-border text-foreground hover:bg-secondary",

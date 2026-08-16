@@ -77,6 +77,31 @@ export function useRemoveBlock() {
   return useMutation(orpc.admin.removeBlock.mutationOptions({ onSuccess: invalidate }));
 }
 
+/** Situação do dia na agenda (aberto, fechado pela regra, bloqueado). */
+export function useDayStatus(date: string) {
+  return useQuery(orpc.admin.dayStatus.queryOptions({ input: { date }, staleTime: 0 }));
+}
+
+/** Dias liberados manualmente, de hoje em diante. */
+export function useReleasedDays() {
+  return useQuery(orpc.admin.releasedDays.queryOptions({ staleTime: 0 }));
+}
+
+export function useOpenDay() {
+  const invalidate = useInvalidateAdmin();
+  return useMutation(orpc.admin.openDay.mutationOptions({ onSuccess: invalidate }));
+}
+
+export function useCloseDay() {
+  const invalidate = useInvalidateAdmin();
+  return useMutation(orpc.admin.closeDay.mutationOptions({ onSuccess: invalidate }));
+}
+
+export function useSetWorkDays() {
+  const invalidate = useInvalidateAdmin();
+  return useMutation(orpc.admin.setWorkDays.mutationOptions({ onSuccess: invalidate }));
+}
+
 export function useAdminSettings() {
   return useQuery(orpc.admin.settings.queryOptions());
 }
@@ -115,4 +140,18 @@ export function useAddTenantAdmin() {
 export function useRemoveTenantAdmin() {
   const invalidate = useInvalidateTenants();
   return useMutation(orpc.tenants.removeAdmin.mutationOptions({ onSuccess: invalidate }));
+}
+
+/** Troca as áreas do painel liberadas para um usuário convidado. */
+export function useSetAdminAccess() {
+  const invalidate = useInvalidateTenants();
+  return useMutation(orpc.tenants.setAdminAccess.mutationOptions({ onSuccess: invalidate }));
+}
+
+/** Descarta o pedido de integração de plataforma de uma unidade. */
+export function useClearTenantIntegrationRequest() {
+  const invalidate = useInvalidateTenants();
+  return useMutation(
+    orpc.tenants.clearIntegrationRequest.mutationOptions({ onSuccess: invalidate }),
+  );
 }

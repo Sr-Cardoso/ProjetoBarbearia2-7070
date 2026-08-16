@@ -59,6 +59,40 @@ export function useSaveMessagingConfig() {
   return useMutation(orpc.store.saveMessagingConfig.mutationOptions({ onSuccess: invalidate }));
 }
 
+/** Integração BlipBeauty: salva URL da API + API key (a chave nunca volta). */
+export function useSaveBlipIntegration() {
+  const invalidate = useInvalidateStore();
+  return useMutation(orpc.store.saveBlipIntegration.mutationOptions({ onSuccess: invalidate }));
+}
+
+/** Confere a chave no BlipBeauty e devolve o estado dele. */
+export function useTestBlipIntegration() {
+  return useMutation(orpc.store.testBlipIntegration.mutationOptions());
+}
+
+/** Manda a agenda (clientes + horários) para o BlipBeauty agora. */
+export function useSyncBlipAgenda() {
+  const invalidate = useInvalidateStore();
+  return useMutation(orpc.store.syncBlipAgenda.mutationOptions({ onSuccess: invalidate }));
+}
+
+/** Estado do acesso do BlipBeauty à agenda (token de entrada + endpoints). */
+export function useBlipAccess() {
+  return useQuery(orpc.store.blipAccess.queryOptions({ staleTime: 0 }));
+}
+
+/** Gera um token novo para o BlipBeauty ler a agenda (mostrado uma única vez). */
+export function useGenerateBlipToken() {
+  const invalidate = useInvalidateStore();
+  return useMutation(orpc.store.generateBlipToken.mutationOptions({ onSuccess: invalidate }));
+}
+
+/** Revoga o token: o BlipBeauty perde o acesso na hora. */
+export function useRevokeBlipToken() {
+  const invalidate = useInvalidateStore();
+  return useMutation(orpc.store.revokeBlipToken.mutationOptions({ onSuccess: invalidate }));
+}
+
 /** Fila de mensagens (lembretes e reativações). */
 export function useMessages() {
   return useQuery(orpc.store.messages.queryOptions({ input: {}, staleTime: 0 }));
@@ -83,4 +117,20 @@ export function useRetryMessage() {
 export function useRunMessages() {
   const invalidate = useInvalidateStore();
   return useMutation(orpc.store.runMessages.mutationOptions({ onSuccess: invalidate }));
+}
+
+/** Pedido de integração de plataforma pendente nesta unidade. */
+export function useIntegrationRequest() {
+  return useQuery(orpc.store.integrationRequest.queryOptions({ staleTime: 0 }));
+}
+
+/** Pede ao dono a liberação de uma plataforma de mensagens. */
+export function useRequestIntegration() {
+  const invalidate = useInvalidateStore();
+  return useMutation(orpc.store.requestIntegration.mutationOptions({ onSuccess: invalidate }));
+}
+
+export function useClearIntegrationRequest() {
+  const invalidate = useInvalidateStore();
+  return useMutation(orpc.store.clearIntegrationRequest.mutationOptions({ onSuccess: invalidate }));
 }

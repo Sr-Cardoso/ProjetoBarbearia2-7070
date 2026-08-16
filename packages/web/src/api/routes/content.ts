@@ -2,7 +2,10 @@ import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { db } from "../database";
 import * as schema from "../database/schema";
-import { adminBase, tenantBase } from "../middleware/auth";
+import { adminSections, tenantBase } from "../middleware/auth";
+
+/** Edição do site é a área "Site" do painel. */
+const siteOnly = adminSections("site");
 import { DEFAULT_CONTENT, mergeContent, parseContent } from "../lib/site-content";
 
 async function loadRow(tenantId: number) {
@@ -47,7 +50,7 @@ export const content = {
     }),
 
   /** Rascunho + estado de publicação (painel). */
-  draft: adminBase.handler(async ({ context }) => {
+  draft: siteOnly.handler(async ({ context }) => {
     const row = await ensureRow(context.tenant.id);
     return {
       draft: parseContent(row.draft),
@@ -57,7 +60,7 @@ export const content = {
   }),
 
   /** Salva o rascunho (não publica). */
-  saveDraft: adminBase
+  saveDraft: siteOnly
     .input(z.object({ content: z.unknown() }))
     .handler(async ({ input, context }) => {
       await ensureRow(context.tenant.id);
@@ -70,7 +73,7 @@ export const content = {
     }),
 
   /** Publica o rascunho atual no site. */
-  publish: adminBase.handler(async ({ context }) => {
+  publish: siteOnly.handler(async ({ context }) => {
     const row = await ensureRow(context.tenant.id);
     const now = new Date();
     await db
@@ -81,7 +84,7 @@ export const content = {
   }),
 
   /** Descarta o rascunho e volta para o conteúdo publicado. */
-  discard: adminBase.handler(async ({ context }) => {
+  discard: siteOnly.handler(async ({ context }) => {
     const row = await ensureRow(context.tenant.id);
     await db
       .update(schema.siteContent)
@@ -91,7 +94,7 @@ export const content = {
   }),
 
   /** Restaura o conteúdo padrão no rascunho. */
-  reset: adminBase.handler(async ({ context }) => {
+  reset: siteOnly.handler(async ({ context }) => {
     await ensureRow(context.tenant.id);
     await db
       .update(schema.siteContent)

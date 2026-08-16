@@ -13,6 +13,7 @@ import { account } from "./routes/account";
 import { shop } from "./routes/shop";
 import { store } from "./routes/store";
 import { startMessenger } from "./lib/messenger";
+import { registerBlipApi } from "./lib/blip-api";
 
 // API features are oRPC procedures, one file per feature in ./routes/,
 // composed into this router — typed end-to-end via the clients
@@ -39,6 +40,9 @@ const app = createApp(router);
 startMessenger();
 
 app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+
+// Leitura da agenda/clientes pelo app BlipBeauty (token gerado no painel).
+registerBlipApi(app);
 
 /** Entrega as imagens enviadas pelo painel direto do storage. */
 app.get("/api/files/*", async (c) => {

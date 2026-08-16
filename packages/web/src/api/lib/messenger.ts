@@ -27,12 +27,13 @@ import {
   SLOTS,
   addDaysISO,
   daysBetweenISO,
-  isWeekend,
   normalizePhone,
   slotRange,
   slotStartMs,
   todayISO,
 } from "./schedule";
+import { isOpenDate, loadScheduleRules } from "./agenda-rules";
+import { syncTenantToBlip } from "./blip-sync";
 
 /** Status de agendamento que ainda merecem lembrete. */
 const REMINDABLE = ["pending", "confirmed"];
@@ -166,12 +167,13 @@ async function nextFreeSlots(tenantId: number, limit = 4): Promise<string[]> {
     .where(and(eq(schema.barbers.tenantId, tenantId), eq(schema.barbers.active, true)));
   const capacity = Math.max(activeBarbers.length, 1);
 
+  const rules = await loadScheduleRules(tenantId);
   const out: string[] = [];
   let date = todayISO();
 
   for (let i = 0; i < 10 && out.length < limit; i++) {
     date = addDaysISO(date, 1);
-    if (isWeekend(date)) continue;
+    if (!isOpenDate(date, rules)) continue;
 
     const [taken, dayBlocks] = await Promise.all([
       db
@@ -275,7 +277,11 @@ async function queueReactivations(
 /* -------------------------------------------------------------- despacho */
 
 /** Envia as mensagens vencidas da unidade pelo canal configurado. */
-async function dispatchQueue(tenantId: number, channel: string): Promise<{ sent: number; failed: number }> {
+async function dispatchQueue(
+  tenantId: number,
+  channel: string,
+  config: MessagingConfig,
+): Promise<{ sent: number; failed: number }> {
   const pending = await db
     .select()
     .from(schema.messages)
@@ -296,9 +302,10 @@ async function dispatchQueue(tenantId: number, channel: string): Promise<{ sent:
     if (channel === "manual") continue; // fica na fila para envio pelo painel
     try {
       const delivered = await deliverMessage(
-        channel as "whatsapp" | "sms",
+        channel as "whatsapp" | "sms" | "blip",
         message.toPhone,
         message.body,
+        { blip: config.blip, toName: message.toName, kind: message.kind as MessageKind },
       );
       if (!delivered) continue;
       await db
@@ -327,6 +334,8 @@ export type MessengerRun = {
   reactivations: number;
   sent: number;
   failed: number;
+  /** Horários espelhados no BlipBeauty (quando o canal é BlipBeauty). */
+  synced: number;
 };
 
 /** Roda um ciclo completo (todas as unidades ativas, ou apenas uma). */
@@ -340,14 +349,31 @@ export async function runMessenger(onlyTenantId?: number): Promise<MessengerRun>
         : eq(schema.tenants.active, true),
     );
 
-  const result: MessengerRun = { tenants: list.length, reminders: 0, reactivations: 0, sent: 0, failed: 0 };
+  const result: MessengerRun = {
+    tenants: list.length,
+    reminders: 0,
+    reactivations: 0,
+    sent: 0,
+    failed: 0,
+    synced: 0,
+  };
 
   for (const tenant of list) {
     const config = await messagingConfig(tenant.id);
-    const channel = resolveChannel(config.provider);
+    const channel = resolveChannel(config);
+
+    // Canal BlipBeauty: quem lembra e reativa é o BlipBeauty. O site só mantém
+    // a agenda espelhada lá — nada entra na fila local para não duplicar.
+    if (channel === "blip") {
+      const sync = await syncTenantToBlip(tenant.id);
+      result.synced += sync.agendamentos;
+      result.failed += sync.falhas;
+      continue;
+    }
+
     result.reminders += await queueReminders(tenant, config, channel);
     result.reactivations += await queueReactivations(tenant, config, channel);
-    const dispatched = await dispatchQueue(tenant.id, channel);
+    const dispatched = await dispatchQueue(tenant.id, channel, config);
     result.sent += dispatched.sent;
     result.failed += dispatched.failed;
   }
@@ -370,9 +396,9 @@ export function startMessenger() {
   const tick = async () => {
     try {
       const run = await runMessenger();
-      if (run.reminders || run.reactivations || run.sent || run.failed) {
+      if (run.reminders || run.reactivations || run.sent || run.failed || run.synced) {
         console.info(
-          `[mensagens] lembretes:${run.reminders} reativações:${run.reactivations} enviadas:${run.sent} falhas:${run.failed}`,
+          `[mensagens] lembretes:${run.reminders} reativações:${run.reactivations} enviadas:${run.sent} falhas:${run.failed} blip:${run.synced}`,
         );
       }
     } catch (error) {

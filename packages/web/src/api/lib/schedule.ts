@@ -31,10 +31,45 @@ export function isValidDate(date: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(date) && !Number.isNaN(Date.parse(`${date}T00:00:00`));
 }
 
-/** true para sábado/domingo (a barbearia atende seg–sex). */
-export function isWeekend(date: string): boolean {
-  const day = new Date(`${date}T12:00:00`).getDay();
-  return day === 0 || day === 6;
+/** Dias de atendimento padrão quando a unidade não configurou nada (0 = domingo). */
+export const DEFAULT_WORK_DAYS = [1, 2, 3, 4, 5];
+
+/** Dia da semana da data (0 = domingo ... 6 = sábado). */
+export function weekdayIndex(date: string): number {
+  return new Date(`${date}T12:00:00`).getDay();
+}
+
+/** "1,2,3,4,5" -> [1,2,3,4,5]. Valor inválido/vazio cai no padrão seg–sex. */
+export function parseWorkDays(raw: string | null | undefined): number[] {
+  const days = (raw ?? "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "")
+    .map(Number)
+    .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6);
+  const unique = [...new Set(days)].sort((a, b) => a - b);
+  return unique.length > 0 ? unique : [...DEFAULT_WORK_DAYS];
+}
+
+/** [1,2,3,4,5] -> "1,2,3,4,5" */
+export function serializeWorkDays(days: number[]): string {
+  return [...new Set(days)].sort((a, b) => a - b).join(",");
+}
+
+const WEEKDAYS_SHORT = ["domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado"];
+
+/** [1,2,3,4,5] -> "de segunda a sexta"; [1,3,6] -> "segunda, quarta e sábado". */
+export function workDaysLabel(days: number[]): string {
+  const sorted = [...new Set(days)].sort((a, b) => a - b);
+  if (sorted.length === 0) return "sob agendamento liberado";
+  if (sorted.length === 7) return "todos os dias";
+  const sequential = sorted.every((day, i) => i === 0 || day === sorted[i - 1] + 1);
+  if (sequential && sorted.length >= 3) {
+    return `de ${WEEKDAYS_SHORT[sorted[0]]} a ${WEEKDAYS_SHORT[sorted[sorted.length - 1]]}`;
+  }
+  const names = sorted.map((day) => WEEKDAYS_SHORT[day]);
+  if (names.length === 1) return `só ${names[0]}`;
+  return `${names.slice(0, -1).join(", ")} e ${names[names.length - 1]}`;
 }
 
 const WEEKDAYS = [

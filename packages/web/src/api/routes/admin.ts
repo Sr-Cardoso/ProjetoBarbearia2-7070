@@ -1,10 +1,11 @@
 import { z } from "zod";
-import { and, asc, desc, eq, gte, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull } from "drizzle-orm";
 import { ORPCError } from "@orpc/server";
 import { db } from "../database";
 import * as schema from "../database/schema";
 import {
   adminBase,
+  adminSections,
   tenantBase,
   passwordToken,
   safeTokenEqual,
@@ -13,11 +14,35 @@ import {
 } from "../middleware/auth";
 import { checkLock, clientKey, lockMessage, registerFailure, registerSuccess } from "../lib/login-guard";
 import { auth } from "../auth";
-import { isSuperAdmin, tenantAdminEmails } from "../lib/tenant";
-import { BUSY_STATUSES, SLOTS, isValidDate, todayISO } from "../lib/schedule";
+import { tenantAdminAccess } from "../lib/tenant";
+import {
+  BUSY_STATUSES,
+  SLOTS,
+  isPast,
+  isValidDate,
+  serializeWorkDays,
+  todayISO,
+  weekdayIndex,
+  weekdayName,
+  workDaysLabel,
+} from "../lib/schedule";
+import { loadScheduleRules } from "../lib/agenda-rules";
+import { APP_BOOKING_MODES, type AppBookingMode, isValidAppUrl } from "../lib/app-redirect";
 import { cancelAppointmentMessages } from "../lib/messenger";
+import { syncAppointmentToBlip } from "../lib/blip-sync";
+import { BLIP_SETTINGS_PREFIX } from "../lib/blip";
+import { allSections } from "../lib/permissions";
 
+/** Bases por área do painel — ver `lib/permissions.ts`. */
 const authed = adminBase;
+const agendaOnly = adminSections("agenda");
+const servicesOnly = adminSections("servicos");
+const barbersOnly = adminSections("barbeiros");
+const blocksOnly = adminSections("bloqueios");
+const agendaOrBlocks = adminSections("agenda", "bloqueios");
+const configOnly = adminSections("config");
+/** Leitura de serviços/barbeiros: qualquer aba operacional precisa da lista. */
+const catalogRead = adminSections("agenda", "servicos", "barbeiros", "bloqueios", "produtos");
 
 const statusEnum = z.enum(["pending", "confirmed", "done", "cancelled"]);
 
@@ -98,6 +123,8 @@ export const admin = {
         via: "password" as const,
         email: null as string | null,
         superAdmin: true,
+        sections: allSections(),
+        canIntegrations: true,
         tenant,
       };
     }
@@ -110,22 +137,27 @@ export const admin = {
         via: null,
         email: null as string | null,
         superAdmin: false,
+        sections: [] as ReturnType<typeof allSections>,
+        canIntegrations: false,
         tenant,
       };
     }
 
-    const allowed = await tenantAdminEmails(context.tenant.id);
+    // Áreas liberadas para esse e-mail nesta unidade (super admin recebe todas).
+    const access = await tenantAdminAccess(context.tenant.id, email);
     return {
-      ok: allowed.includes(email),
+      ok: access !== null,
       via: "google" as const,
       email,
-      superAdmin: await isSuperAdmin(email),
+      superAdmin: access?.superAdmin ?? false,
+      sections: access?.sections ?? [],
+      canIntegrations: access?.canIntegrations ?? false,
       tenant,
     };
   }),
 
   /** Agenda de um dia, com serviço e barbeiro resolvidos. */
-  agenda: authed
+  agenda: agendaOnly
     .input(z.object({ date: z.string().refine(isValidDate, "Data inválida") }))
     .handler(async ({ input, context }) => {
       const rows = await db
@@ -157,7 +189,7 @@ export const admin = {
     }),
 
   /** Próximos agendamentos (a partir de hoje) para o painel. */
-  upcoming: authed.handler(async ({ context }) => {
+  upcoming: agendaOnly.handler(async ({ context }) => {
     const rows = await db
       .select({
         appointment: schema.appointments,
@@ -202,7 +234,7 @@ export const admin = {
   }),
 
   /** Histórico completo, mais recentes primeiro. */
-  history: authed
+  history: agendaOnly
     .input(z.object({ status: statusEnum.optional() }).optional())
     .handler(async ({ input, context }) => {
       const rows = await db
@@ -233,7 +265,7 @@ export const admin = {
       return rows;
     }),
 
-  setStatus: authed
+  setStatus: agendaOnly
     .input(z.object({ id: z.number().int().positive(), status: statusEnum }))
     .handler(async ({ input, context }) => {
       const [updated] = await db
@@ -251,10 +283,12 @@ export const admin = {
           message: "Agendamento não encontrado.",
         });
       if (input.status === "cancelled") await cancelAppointmentMessages(input.id);
+      // Avisa o BlipBeauty da mudança de status (confirmado, concluído, cancelado).
+      void syncAppointmentToBlip(context.tenant.id, input.id);
       return updated;
     }),
 
-  removeAppointment: authed
+  removeAppointment: agendaOnly
     .input(z.object({ id: z.number().int().positive() }))
     .handler(async ({ input, context }) => {
       await db
@@ -269,7 +303,7 @@ export const admin = {
     }),
 
   /** Todos os serviços, inclusive inativos. */
-  allServices: authed.handler(({ context }) =>
+  allServices: catalogRead.handler(({ context }) =>
     db
       .select()
       .from(schema.services)
@@ -277,7 +311,7 @@ export const admin = {
       .orderBy(asc(schema.services.sortOrder), asc(schema.services.id)),
   ),
 
-  saveService: authed.input(serviceInput).handler(async ({ input, context }) => {
+  saveService: servicesOnly.input(serviceInput).handler(async ({ input, context }) => {
     const { id, ...values } = input;
     if (id) {
       const [updated] = await db
@@ -294,7 +328,7 @@ export const admin = {
     return created;
   }),
 
-  removeService: authed
+  removeService: servicesOnly
     .input(z.object({ id: z.number().int().positive() }))
     .handler(async ({ input, context }) => {
       const used = await db
@@ -325,7 +359,7 @@ export const admin = {
     }),
 
   /** Todos os barbeiros, inclusive inativos. */
-  allBarbers: authed.handler(({ context }) =>
+  allBarbers: catalogRead.handler(({ context }) =>
     db
       .select()
       .from(schema.barbers)
@@ -333,7 +367,7 @@ export const admin = {
       .orderBy(asc(schema.barbers.sortOrder), asc(schema.barbers.id)),
   ),
 
-  saveBarber: authed.input(barberInput).handler(async ({ input, context }) => {
+  saveBarber: barbersOnly.input(barberInput).handler(async ({ input, context }) => {
     const { id, ...values } = input;
     if (id) {
       const [updated] = await db
@@ -350,7 +384,7 @@ export const admin = {
     return created;
   }),
 
-  removeBarber: authed
+  removeBarber: barbersOnly
     .input(z.object({ id: z.number().int().positive() }))
     .handler(async ({ input, context }) => {
       const used = await db
@@ -381,7 +415,7 @@ export const admin = {
     }),
 
   /** Bloqueios a partir de hoje. */
-  blocks: authed.handler(({ context }) =>
+  blocks: blocksOnly.handler(({ context }) =>
     db
       .select({ block: schema.blocks, barber: schema.barbers })
       .from(schema.blocks)
@@ -392,7 +426,7 @@ export const admin = {
       .orderBy(asc(schema.blocks.date)),
   ),
 
-  createBlock: authed
+  createBlock: blocksOnly
     .input(
       z.object({
         date: z.string().refine(isValidDate, "Data inválida"),
@@ -409,7 +443,7 @@ export const admin = {
       return created;
     }),
 
-  removeBlock: authed
+  removeBlock: blocksOnly
     .input(z.object({ id: z.number().int().positive() }))
     .handler(async ({ input, context }) => {
       await db
@@ -418,17 +452,207 @@ export const admin = {
       return { ok: true };
     }),
 
+  /**
+   * Situação do dia na agenda: se está aberto, por que está fechado e o que
+   * o painel pode fazer (liberar ou fechar).
+   */
+  dayStatus: agendaOrBlocks
+    .input(z.object({ date: z.string().refine(isValidDate, "Data inválida") }))
+    .handler(async ({ input, context }) => {
+      const tenantId = context.tenant.id;
+      const [rules, dayBlocks] = await Promise.all([
+        loadScheduleRules(tenantId),
+        db
+          .select()
+          .from(schema.blocks)
+          .where(and(eq(schema.blocks.tenantId, tenantId), eq(schema.blocks.date, input.date))),
+      ]);
+
+      const fullDayBlocks = dayBlocks.filter((b) => b.slot === null && b.barberId === null);
+      const workDay = rules.workDays.includes(weekdayIndex(input.date));
+      const released = rules.openDates.includes(input.date);
+
+      return {
+        date: input.date,
+        weekday: weekdayName(input.date),
+        past: isPast(input.date),
+        workDay,
+        released,
+        blockedFullDay: fullDayBlocks.length > 0,
+        blockedSlots: dayBlocks.filter((b) => b.slot !== null).length,
+        open: (workDay || released) && fullDayBlocks.length === 0,
+        workDays: rules.workDays,
+        workDaysLabel: workDaysLabel(rules.workDays),
+      };
+    }),
+
+  /** Dias liberados manualmente, de hoje em diante. */
+  releasedDays: blocksOnly.handler(({ context }) =>
+    db
+      .select()
+      .from(schema.openDays)
+      .where(
+        and(eq(schema.openDays.tenantId, context.tenant.id), gte(schema.openDays.date, todayISO())),
+      )
+      .orderBy(asc(schema.openDays.date)),
+  ),
+
+  /**
+   * Libera o dia para os clientes: remove o bloqueio de dia inteiro e, quando
+   * a data cai fora dos dias de atendimento, registra a abertura pontual.
+   */
+  openDay: agendaOrBlocks
+    .input(
+      z.object({
+        date: z.string().refine(isValidDate, "Data inválida"),
+        reason: z.string().trim().max(200).default(""),
+      }),
+    )
+    .handler(async ({ input, context }) => {
+      const tenantId = context.tenant.id;
+      if (isPast(input.date)) {
+        throw new ORPCError("BAD_REQUEST", { message: "Essa data já passou." });
+      }
+
+      await db
+        .delete(schema.blocks)
+        .where(
+          and(
+            eq(schema.blocks.tenantId, tenantId),
+            eq(schema.blocks.date, input.date),
+            isNull(schema.blocks.slot),
+          ),
+        );
+
+      const rules = await loadScheduleRules(tenantId);
+      const workDay = rules.workDays.includes(weekdayIndex(input.date));
+      if (!workDay) {
+        await db
+          .insert(schema.openDays)
+          .values({ tenantId, date: input.date, reason: input.reason })
+          .onConflictDoUpdate({
+            target: [schema.openDays.tenantId, schema.openDays.date],
+            set: { reason: input.reason },
+          });
+      }
+
+      const remainingSlotBlocks = await db
+        .select({ id: schema.blocks.id })
+        .from(schema.blocks)
+        .where(and(eq(schema.blocks.tenantId, tenantId), eq(schema.blocks.date, input.date)));
+
+      return { ok: true, released: !workDay, remainingSlotBlocks: remainingSlotBlocks.length };
+    }),
+
+  /** Fecha o dia: tira a liberação pontual e bloqueia o dia inteiro. */
+  closeDay: agendaOrBlocks
+    .input(
+      z.object({
+        date: z.string().refine(isValidDate, "Data inválida"),
+        reason: z.string().trim().max(200).default(""),
+      }),
+    )
+    .handler(async ({ input, context }) => {
+      const tenantId = context.tenant.id;
+      await db
+        .delete(schema.openDays)
+        .where(and(eq(schema.openDays.tenantId, tenantId), eq(schema.openDays.date, input.date)));
+
+      const rules = await loadScheduleRules(tenantId);
+      if (rules.workDays.includes(weekdayIndex(input.date))) {
+        const existing = await db
+          .select({ id: schema.blocks.id })
+          .from(schema.blocks)
+          .where(
+            and(
+              eq(schema.blocks.tenantId, tenantId),
+              eq(schema.blocks.date, input.date),
+              isNull(schema.blocks.slot),
+              isNull(schema.blocks.barberId),
+            ),
+          );
+        if (existing.length === 0) {
+          await db.insert(schema.blocks).values({
+            tenantId,
+            date: input.date,
+            slot: null,
+            barberId: null,
+            reason: input.reason || "Fechado pelo painel",
+          });
+        }
+      }
+      return { ok: true };
+    }),
+
+  /** Define os dias da semana em que a barbearia atende (0 = domingo). */
+  setWorkDays: blocksOnly
+    .input(z.object({ days: z.array(z.number().int().min(0).max(6)).min(1, "Escolha pelo menos um dia") }))
+    .handler(async ({ input, context }) => {
+      const value = serializeWorkDays(input.days);
+      await db
+        .insert(schema.settings)
+        .values({ tenantId: context.tenant.id, key: "workDays", value })
+        .onConflictDoUpdate({
+          target: [schema.settings.tenantId, schema.settings.key],
+          set: { value },
+        });
+      return { ok: true, workDays: value };
+    }),
+
   settings: authed.handler(async ({ context }) => {
     const rows = await db
       .select()
       .from(schema.settings)
       .where(eq(schema.settings.tenantId, context.tenant.id));
-    return Object.fromEntries(rows.map((r) => [r.key, r.value])) as Record<string, string>;
+    // Chaves de integração (`blip*`) só saem para quem pode configurá-las.
+    const visible = context.admin.canIntegrations
+      ? rows
+      : rows.filter((r) => !r.key.startsWith(BLIP_SETTINGS_PREFIX));
+    return Object.fromEntries(visible.map((r) => [r.key, r.value])) as Record<string, string>;
   }),
 
-  saveSettings: authed
+  saveSettings: configOnly
     .input(z.object({ entries: z.record(z.string(), z.string()) }))
     .handler(async ({ input, context }) => {
+      const appUrl = input.entries.appBookingUrl?.trim();
+      if (appUrl && !isValidAppUrl(appUrl)) {
+        throw new ORPCError("BAD_REQUEST", {
+          message: "Link do aplicativo inválido. Use um endereço completo, ex.: https://…",
+        });
+      }
+      // Convidado sem direito de integração não grava credencial por aqui.
+      if (
+        !context.admin.canIntegrations &&
+        Object.keys(input.entries).some((key) => key.startsWith(BLIP_SETTINGS_PREFIX))
+      ) {
+        throw new ORPCError("FORBIDDEN", {
+          message: "Só o dono da conta configura a integração de plataformas de mensagem.",
+        });
+      }
+      const appMode = input.entries.appBookingMode;
+      if (appMode !== undefined && !APP_BOOKING_MODES.includes(appMode as AppBookingMode)) {
+        throw new ORPCError("BAD_REQUEST", { message: "Modo de redirecionamento inválido." });
+      }
+      // O painel pode salvar só o modo: nesse caso vale o link já guardado.
+      let effectiveUrl = appUrl;
+      if (appMode && appMode !== "off" && appUrl === undefined) {
+        const saved = await db
+          .select()
+          .from(schema.settings)
+          .where(
+            and(
+              eq(schema.settings.tenantId, context.tenant.id),
+              eq(schema.settings.key, "appBookingUrl"),
+            ),
+          )
+          .limit(1);
+        effectiveUrl = saved[0]?.value?.trim();
+      }
+      if (appMode && appMode !== "off" && !effectiveUrl) {
+        throw new ORPCError("BAD_REQUEST", {
+          message: "Salve o link do aplicativo antes de ativar o redirecionamento.",
+        });
+      }
       for (const [key, value] of Object.entries(input.entries)) {
         await db
           .insert(schema.settings)

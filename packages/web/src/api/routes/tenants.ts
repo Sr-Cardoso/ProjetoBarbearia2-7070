@@ -5,6 +5,14 @@ import { db } from "../database";
 import * as schema from "../database/schema";
 import { adminBase } from "../middleware/auth";
 import { normalizeDomain } from "../lib/tenant";
+import {
+  DEFAULT_SECTIONS,
+  INTEGRATION_REQUEST_KEY,
+  parseIntegrationRequest,
+  parseSections,
+  SECTIONS,
+  serializeSections,
+} from "../lib/permissions";
 
 /** Só super admin gerencia unidades. */
 const superAdmin = adminBase.use(async ({ context, next }) => {
@@ -15,15 +23,24 @@ const superAdmin = adminBase.use(async ({ context, next }) => {
 });
 
 export const tenants = {
-  /** Unidades com seus e-mails de admin. */
+  /** Unidades com seus usuários liberados e o pedido de integração pendente. */
   list: superAdmin.handler(async () => {
-    const [rows, admins] = await Promise.all([
+    const [rows, admins, requests] = await Promise.all([
       db.select().from(schema.tenants).orderBy(asc(schema.tenants.id)),
       db.select().from(schema.tenantAdmins),
+      db
+        .select()
+        .from(schema.settings)
+        .where(eq(schema.settings.key, INTEGRATION_REQUEST_KEY)),
     ]);
     return rows.map((tenant) => ({
       ...tenant,
-      admins: admins.filter((a) => a.tenantId === tenant.id),
+      admins: admins
+        .filter((a) => a.tenantId === tenant.id)
+        .map((a) => ({ ...a, sections: parseSections(a.sections) })),
+      integrationRequest: parseIntegrationRequest(
+        requests.find((r) => r.tenantId === tenant.id)?.value,
+      ),
     }));
   }),
 
@@ -84,16 +101,24 @@ export const tenants = {
       return { ok: true, deactivated: false };
     }),
 
+  /**
+   * Libera o acesso de um e-mail Google na unidade, já com as áreas marcadas.
+   * Reenviar o mesmo e-mail atualiza as áreas em vez de duplicar o cadastro.
+   */
   addAdmin: superAdmin
     .input(
       z.object({
         tenantId: z.number().int().positive(),
         email: z.string().trim().email("E-mail inválido"),
+        name: z.string().trim().max(80).default(""),
         superAdmin: z.boolean().default(false),
+        sections: z.array(z.enum(SECTIONS)).default(DEFAULT_SECTIONS),
+        canIntegrations: z.boolean().default(false),
       }),
     )
     .handler(async ({ input }) => {
       const email = input.email.toLowerCase();
+      const sections = serializeSections(input.sections);
       const [existing] = await db
         .select()
         .from(schema.tenantAdmins)
@@ -103,12 +128,77 @@ export const tenants = {
             eq(schema.tenantAdmins.email, email),
           ),
         );
-      if (existing) return existing;
+      if (existing) {
+        const [updated] = await db
+          .update(schema.tenantAdmins)
+          .set({
+            name: input.name || existing.name,
+            sections,
+            canIntegrations: input.canIntegrations,
+          })
+          .where(eq(schema.tenantAdmins.id, existing.id))
+          .returning();
+        return { ...updated!, sections: parseSections(updated!.sections) };
+      }
       const [created] = await db
         .insert(schema.tenantAdmins)
-        .values({ tenantId: input.tenantId, email, superAdmin: input.superAdmin })
+        .values({
+          tenantId: input.tenantId,
+          email,
+          name: input.name,
+          superAdmin: input.superAdmin,
+          sections,
+          canIntegrations: input.canIntegrations,
+        })
         .returning();
-      return created;
+      return { ...created!, sections: parseSections(created!.sections) };
+    }),
+
+  /** Troca as áreas liberadas (e o direito de integração) de um usuário. */
+  setAdminAccess: superAdmin
+    .input(
+      z.object({
+        id: z.number().int().positive(),
+        sections: z.array(z.enum(SECTIONS)),
+        canIntegrations: z.boolean().default(false),
+        name: z.string().trim().max(80).optional(),
+      }),
+    )
+    .handler(async ({ input }) => {
+      const [row] = await db
+        .select()
+        .from(schema.tenantAdmins)
+        .where(eq(schema.tenantAdmins.id, input.id));
+      if (!row) throw new ORPCError("NOT_FOUND", { message: "Usuário não encontrado." });
+      if (row.superAdmin) {
+        throw new ORPCError("BAD_REQUEST", {
+          message: "O super admin já tem acesso a tudo.",
+        });
+      }
+      const [updated] = await db
+        .update(schema.tenantAdmins)
+        .set({
+          sections: serializeSections(input.sections),
+          canIntegrations: input.canIntegrations,
+          ...(input.name === undefined ? {} : { name: input.name }),
+        })
+        .where(eq(schema.tenantAdmins.id, input.id))
+        .returning();
+      return { ...updated!, sections: parseSections(updated!.sections) };
+    }),
+
+  /** Descarta o pedido de integração de uma unidade. */
+  clearIntegrationRequest: superAdmin
+    .input(z.object({ tenantId: z.number().int().positive() }))
+    .handler(async ({ input }) => {
+      await db
+        .insert(schema.settings)
+        .values({ key: INTEGRATION_REQUEST_KEY, value: "", tenantId: input.tenantId })
+        .onConflictDoUpdate({
+          target: [schema.settings.tenantId, schema.settings.key],
+          set: { value: "" },
+        });
+      return { ok: true };
     }),
 
   removeAdmin: superAdmin
